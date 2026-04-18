@@ -1,0 +1,5 @@
+pygame==2.6.1
+pymunk==7.2.0
+pillow==12.2.0
+numpy==2.4.4
+pyinstaller==6.19.0
