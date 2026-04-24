@@ -26,31 +26,18 @@ PLAYER_SPEED = 320
 PLAYER_MAX_LIVES = 3
 INVULNERABILITY_TIME = 0.9
 SHOOT_COOLDOWN = 0.14
-BULLET_SPEED = 760
-BULLET_RADIUS = 5
 ENEMY_CONTACT_COOLDOWN = 0.5
+HITSCAN_RANGE = 1600
+TRAIL_DURATION = 0.05
 
 
 @dataclass
-class Bullet:
-    x: float
-    y: float
-    vx: float
-    vy: float
-    radius: int = BULLET_RADIUS
-
-    def update(self, dt: float) -> None:
-        self.x += self.vx * dt
-        self.y += self.vy * dt
-
-    def is_offscreen(self) -> bool:
-        margin = 40
-        return (
-            self.x < -margin
-            or self.x > WINDOW_WIDTH + margin
-            or self.y < -margin
-            or self.y > WINDOW_HEIGHT + margin
-        )
+class ShotTrail:
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    timer: float = TRAIL_DURATION
 
 
 @dataclass
@@ -87,7 +74,7 @@ class ShooterGame:
         self.lives = PLAYER_MAX_LIVES
         self.score = 0
         self.best_score = getattr(self, "best_score", 0)
-        self.bullets: list[Bullet] = []
+        self.shot_trails: list[ShotTrail] = []
         self.enemies: list[Enemy] = []
         self.shoot_timer = 0.0
         self.spawn_timer = 0.0
@@ -123,9 +110,8 @@ class ShooterGame:
 
         self.update_player(dt)
         self.update_shooting()
-        self.update_bullets(dt)
+        self.update_shot_trails(dt)
         self.update_enemies(dt)
-        self.handle_bullet_hits()
         self.handle_player_hits()
         self.spawn_enemies_if_needed()
 
@@ -160,55 +146,59 @@ class ShooterGame:
         if distance == 0:
             return
 
-        vx = dx / distance * BULLET_SPEED
-        vy = dy / distance * BULLET_SPEED
-        bullet_offset = PLAYER_RADIUS + 6
-        self.bullets.append(
-            Bullet(
-                self.player_x + dx / distance * bullet_offset,
-                self.player_y + dy / distance * bullet_offset,
-                vx,
-                vy,
-            )
+        direction_x = dx / distance
+        direction_y = dy / distance
+        muzzle_offset = PLAYER_RADIUS + 6
+        muzzle_x = self.player_x + direction_x * muzzle_offset
+        muzzle_y = self.player_y + direction_y * muzzle_offset
+        end_x = muzzle_x + direction_x * HITSCAN_RANGE
+        end_y = muzzle_y + direction_y * HITSCAN_RANGE
+
+        hit_enemy, hit_distance = self.find_hitscan_target(
+            muzzle_x, muzzle_y, direction_x, direction_y
         )
+        if hit_enemy is not None:
+            hit_distance = max(0.0, hit_distance - hit_enemy.radius * 0.35)
+            end_x = muzzle_x + direction_x * hit_distance
+            end_y = muzzle_y + direction_y * hit_distance
+            self.enemies.remove(hit_enemy)
+            self.score += hit_enemy.points
+            self.best_score = max(self.best_score, self.score)
+
+        self.shot_trails.append(ShotTrail(muzzle_x, muzzle_y, end_x, end_y))
         self.shoot_timer = SHOOT_COOLDOWN
 
-    def update_bullets(self, dt: float) -> None:
-        for bullet in self.bullets:
-            bullet.update(dt)
-        self.bullets = [bullet for bullet in self.bullets if not bullet.is_offscreen()]
+    def update_shot_trails(self, dt: float) -> None:
+        for trail in self.shot_trails:
+            trail.timer -= dt
+        self.shot_trails = [trail for trail in self.shot_trails if trail.timer > 0.0]
 
     def update_enemies(self, dt: float) -> None:
         for enemy in self.enemies:
             enemy.update(dt, self.player_x, self.player_y)
 
-    def handle_bullet_hits(self) -> None:
-        remaining_bullets: list[Bullet] = []
-        remaining_enemies: list[Enemy] = []
-        defeated_indices: set[int] = set()
+    def find_hitscan_target(
+        self, start_x: float, start_y: float, dir_x: float, dir_y: float
+    ) -> tuple[Enemy | None, float]:
+        closest_enemy = None
+        closest_distance = HITSCAN_RANGE
 
-        for bullet in self.bullets:
-            hit_index = None
-            for index, enemy in enumerate(self.enemies):
-                if index in defeated_indices:
-                    continue
-                if self.circle_collision(bullet.x, bullet.y, bullet.radius, enemy.x, enemy.y, enemy.radius):
-                    hit_index = index
-                    break
+        for enemy in self.enemies:
+            to_enemy_x = enemy.x - start_x
+            to_enemy_y = enemy.y - start_y
+            projection = to_enemy_x * dir_x + to_enemy_y * dir_y
+            if projection < 0 or projection > closest_distance:
+                continue
 
-            if hit_index is None:
-                remaining_bullets.append(bullet)
-            else:
-                defeated_indices.add(hit_index)
-                self.score += self.enemies[hit_index].points
-                self.best_score = max(self.best_score, self.score)
+            closest_x = start_x + dir_x * projection
+            closest_y = start_y + dir_y * projection
+            perpendicular_distance = math.hypot(enemy.x - closest_x, enemy.y - closest_y)
 
-        for index, enemy in enumerate(self.enemies):
-            if index not in defeated_indices:
-                remaining_enemies.append(enemy)
+            if perpendicular_distance <= enemy.radius:
+                closest_enemy = enemy
+                closest_distance = projection
 
-        self.bullets = remaining_bullets
-        self.enemies = remaining_enemies
+        return closest_enemy, closest_distance
 
     def handle_player_hits(self) -> None:
         if self.invulnerability_timer > 0.0 or self.contact_damage_timer > 0.0:
@@ -281,7 +271,7 @@ class ShooterGame:
     def draw(self) -> None:
         self.screen.fill(BACKGROUND_COLOR)
         self.draw_grid()
-        self.draw_bullets()
+        self.draw_shot_trails()
         self.draw_enemies()
         self.draw_player()
         self.draw_hud()
@@ -338,14 +328,25 @@ class ShooterGame:
             4,
         )
 
-    def draw_bullets(self) -> None:
-        for bullet in self.bullets:
-            pygame.draw.circle(
-                self.screen,
-                BULLET_COLOR,
-                (int(bullet.x), int(bullet.y)),
-                bullet.radius,
+    def draw_shot_trails(self) -> None:
+        for trail in self.shot_trails:
+            alpha = max(0, min(255, int(255 * (trail.timer / TRAIL_DURATION))))
+            color = (*BULLET_COLOR, alpha)
+            overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+            pygame.draw.line(
+                overlay,
+                color,
+                (trail.start_x, trail.start_y),
+                (trail.end_x, trail.end_y),
+                3,
             )
+            pygame.draw.circle(
+                overlay,
+                color,
+                (int(trail.end_x), int(trail.end_y)),
+                4,
+            )
+            self.screen.blit(overlay, (0, 0))
 
     def draw_enemies(self) -> None:
         for enemy in self.enemies:
